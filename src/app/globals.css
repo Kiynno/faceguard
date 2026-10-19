@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgb(34 211 238 / 0.08), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgb(139 92 246 / 0.07), transparent 60%),
+    #020617;
+}
+
+/* Scanning sweep shown while a session is live */
+.fg-scanline {
+  top: -6rem;
+  background: linear-gradient(to bottom, transparent, rgb(34 211 238 / 0.12), transparent);
+  animation: fg-scan 2.4s linear infinite;
+}
+
+@keyframes fg-scan {
+  to {
+    top: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fg-scanline {
+    animation: none;
+    display: none;
+  }
+}
+
+/* Slim scrollbars for the audit log */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.15) transparent;
+}

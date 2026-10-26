@@ -343,7 +343,7 @@ export default function AuditPanel({
           <dl className="mt-2 grid grid-cols-3 gap-2">
             <Stat
               label="Pulse"
-              value={report.passive.pulseBpm !== null && report.passive.pulseSnr > 1.5 ? `${report.passive.pulseBpm.toFixed(0)} bpm` : "—"}
+              value={report.passive.pulseBpm !== null && report.passive.pulseSnr >= report.config.pad.pulseSnrRange[0] ? `${report.passive.pulseBpm.toFixed(0)} bpm` : "—"}
             />
             <Stat
               label="Flash corr."

@@ -49,3 +49,6 @@ desktop.ini
 !.vscode/extensions.json
 .idea/
 *.swp
+
+# Signing keys
+*.pem

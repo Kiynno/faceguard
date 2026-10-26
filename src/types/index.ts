@@ -1,5 +1,5 @@
 /**
- * FaceGuard — shared domain types.
+ * FaceGuard — shared domain types (browser and server).
  *
  * Terminology follows ISO/IEC 30107-1 (framework) and ISO/IEC 30107-3
  * (testing & reporting): "bona fide presentation", "attack presentation",
@@ -15,10 +15,32 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue };
 
 /* ------------------------------------------------------------------ */
-/* Active challenge–response                                           */
+/* Server-issued session plan                                          */
 /* ------------------------------------------------------------------ */
 
 export type ChallengeType = "BLINK" | "TURN_LEFT" | "TURN_RIGHT" | "SMILE" | "OPEN_MOUTH";
+export type FlashColor = "RED" | "GREEN" | "BLUE";
+
+/** Issued and signed by the server; the client cannot choose its own challenges. */
+export interface SessionPlan {
+  sessionId: string;
+  nonce: string;
+  challenges: ChallengeType[];
+  flashSequence: FlashColor[];
+  issuedAt: string;
+  expiresAt: string;
+  engineVersion: string;
+}
+
+export interface SignedSessionPlan {
+  plan: SessionPlan;
+  /** Compact JWS (EdDSA) over the plan. */
+  token: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Active challenge–response                                           */
+/* ------------------------------------------------------------------ */
 
 export interface Challenge {
   /** Unique, nonce-bound identifier for this issued challenge. */
@@ -40,6 +62,12 @@ export interface ChallengeResult {
   responseTimeMs: number | null;
   /** Strongest signal observed (blendshape score or yaw degrees). */
   peakSignal: number;
+  /**
+   * Head-turn challenges only: how far the landmarks deviate from a flat
+   * (affine) motion between the neutral and turned pose, in inter-ocular
+   * distances. Flat photos and screens stay near 0; real faces do not.
+   */
+  depthResidual: number | null;
 }
 
 export interface ActiveChallengeView {
@@ -79,8 +107,6 @@ export interface FaceMeasurements {
   sharpness: number;
   /** Fraction of near-saturated pixels in the face ROI (screen glare). */
   specularRatio: number;
-  /** Mean std-dev of Cb/Cr chroma channels (colour gamut richness). */
-  chromaStd: number;
   /** Mean luminance of the face ROI, 0..255. */
   brightness: number;
   /** Non-rigid landmark motion vs previous frame (null on first frame). */
@@ -94,10 +120,54 @@ export interface FrameMetrics {
 }
 
 /* ------------------------------------------------------------------ */
+/* Photometric (screen-flash) challenge                                */
+/* ------------------------------------------------------------------ */
+
+export interface PhotometricStep {
+  color: FlashColor;
+  /** Mean face chromaticity [r, g, b] (each = channel / (R+G+B)) after settling. */
+  chroma: [number, number, number];
+  frames: number;
+}
+
+export interface PhotometricResult {
+  sequence: FlashColor[];
+  steps: PhotometricStep[];
+  /** Pearson correlation between emitted colours and measured face colour shifts. */
+  correlation: number;
+  /** RMS of the measured chroma shifts — how strongly the face reflected the screen. */
+  amplitude: number;
+  /** False when the reflection was too weak to judge (bright room, dim screen). */
+  conclusive: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* Injection / virtual-camera signals                                  */
+/* ------------------------------------------------------------------ */
+
+export interface InjectionSignals {
+  cameraLabel: string;
+  virtualCameraSuspected: boolean;
+  /** Share of consecutive frames that were pixel-identical on the face. */
+  duplicateFrameRatio: number;
+  /** Camera exposes no hardware controls (common for virtual devices). */
+  noHardwareCapabilities: boolean;
+}
+
+/* ------------------------------------------------------------------ */
 /* PAD outcome                                                         */
 /* ------------------------------------------------------------------ */
 
-export type PadSignal = "texture" | "specular" | "color" | "motion" | "challenge";
+export type PadSignal =
+  | "challenge"
+  | "depth"
+  | "photometric"
+  | "motion"
+  | "injection"
+  | "pulse"
+  | "moire"
+  | "texture"
+  | "specular";
 
 /** Each sub-score is a 0..1 bona-fide likelihood (1 = looks live). */
 export type PadSubscores = Record<PadSignal, number>;
@@ -108,6 +178,8 @@ export type PaiSpecies =
   | "PRINT"
   | "REPLAY_SCREEN"
   | "STATIC_IMAGE"
+  | "MASK"
+  | "INJECTED_STREAM"
   | "MULTIPLE_SUBJECTS"
   | "SUBJECT_SWAP"
   | "UNKNOWN";
@@ -128,10 +200,21 @@ export interface PassiveSummary {
   multiFaceFrames: number;
   meanSharpness: number;
   meanSpecularRatio: number;
-  meanChromaStd: number;
   meanNonRigidMotion: number;
+  meanMoirePeakiness: number;
+  pulseSnr: number;
+  pulseBpm: number | null;
   spontaneousBlinks: number;
   faceDiscontinuities: number;
+}
+
+/** Everything the decision depends on — recomputed independently by the server. */
+export interface PadInput {
+  plannedChallenges: ChallengeType[];
+  challenges: ChallengeResult[];
+  passive: PassiveSummary;
+  photometric: PhotometricResult;
+  injection: InjectionSignals;
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,7 +222,6 @@ export interface PassiveSummary {
 /* ------------------------------------------------------------------ */
 
 export interface LivenessConfig {
-  challengeCount: number;
   challengeTimeoutMs: number;
   passiveWindowMs: number;
   stableFramesRequired: number;
@@ -161,6 +243,13 @@ export interface LivenessConfig {
     neutralYawDeg: number;
     neutralExpression: number;
     maxRollDeg: number;
+    minHumanResponseMs: number;
+  };
+  photometric: {
+    stepMs: number;
+    settleMs: number;
+    minAmplitude: number;
+    failCorrelation: number;
   };
   pad: {
     bonaFideThreshold: number;
@@ -169,8 +258,12 @@ export interface LivenessConfig {
     /** [low, high] ramps mapping raw signal → 0..1 score. */
     sharpnessRange: [number, number];
     specularRange: [number, number];
-    chromaRange: [number, number];
     nonRigidRange: [number, number];
+    depthRange: [number, number];
+    photometricRange: [number, number];
+    pulseSnrRange: [number, number];
+    moireRange: [number, number];
+    duplicateRange: [number, number];
   };
 }
 
@@ -180,6 +273,7 @@ export type EnginePhase =
   | "ready"
   | "positioning"
   | "passive"
+  | "photometric"
   | "challenge"
   | "evaluating"
   | "complete"
@@ -192,8 +286,10 @@ export interface EngineSnapshot {
   challenge: ActiveChallengeView | null;
   completedChallenges: ChallengeResult[];
   plannedChallenges: ChallengeType[];
+  /** Colour the UI must currently fill the screen with (photometric phase). */
+  flashColor: FlashColor | null;
   metrics: FrameMetrics | null;
-  /** 0..1 progress of the current phase (positioning / passive). */
+  /** 0..1 progress of the current phase. */
   phaseProgress: number;
   result: PadResult | null;
   error: string | null;
@@ -211,10 +307,13 @@ export type AuditEventType =
   | "FACE_LOST"
   | "FACE_DISCONTINUITY"
   | "MULTIPLE_FACES"
+  | "INJECTION_SUSPECTED"
   | "PASSIVE_COMPLETE"
+  | "PHOTOMETRIC_COMPLETE"
   | "CHALLENGE_ISSUED"
   | "CHALLENGE_PASSED"
   | "CHALLENGE_FAILED"
+  | "REFERENCE_CAPTURED"
   | "DECISION"
   | "SESSION_ABORTED"
   | "ERROR";
@@ -249,8 +348,18 @@ export interface DeviceContext {
   };
 }
 
+/** Metadata of the best frontal face crop, bound to the result by its hash. */
+export interface ReferenceImageMeta {
+  sha256: string;
+  mimeType: "image/jpeg";
+  width: number;
+  height: number;
+  capturedAt: string;
+  sharpness: number;
+}
+
 export interface AuditReport {
-  schemaVersion: "faceguard.audit/1.0";
+  schemaVersion: "faceguard.audit/2.0";
   standardReference: {
     framework: "ISO/IEC 30107-1:2023";
     testingReporting: "ISO/IEC 30107-3:2023";
@@ -260,6 +369,7 @@ export interface AuditReport {
   modelVersion: string;
   configDigest: string;
   config: LivenessConfig;
+  signedPlan: SignedSessionPlan;
   sessionId: string;
   nonce: string;
   startedAt: string;
@@ -269,6 +379,9 @@ export interface AuditReport {
   plannedChallenges: ChallengeType[];
   challenges: ChallengeResult[];
   passive: PassiveSummary;
+  photometric: PhotometricResult | null;
+  injection: InjectionSignals;
+  referenceImage: ReferenceImageMeta | null;
   result: PadResult | null;
   /**
    * Fields for offline APCER/BPCER computation per ISO/IEC 30107-3.
@@ -290,4 +403,40 @@ export interface ChainVerification {
   valid: boolean;
   checked: number;
   brokenAt: number | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Server verification                                                 */
+/* ------------------------------------------------------------------ */
+
+export interface VerificationCheck {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+/** Signed by the server; relying parties (e.g. MOSIP onboarding) verify this. */
+export interface AttestationClaims {
+  iss: "faceguard";
+  sub: string;
+  decision: PadDecision;
+  score: number;
+  suspectedPai: PaiSpecies[];
+  chainHead: string;
+  referenceImageSha256: string | null;
+  engineVersion: string;
+  iat: number;
+  exp: number;
+}
+
+export interface VerificationResponse {
+  verified: boolean;
+  /** The server's own decision, recomputed from the submitted signals. */
+  serverResult: PadResult | null;
+  clientServerAgree: boolean;
+  checks: VerificationCheck[];
+  /** Compact JWS (EdDSA) over AttestationClaims; null if verification failed. */
+  attestation: string | null;
+  claims: AttestationClaims | null;
+  keyId: string;
 }

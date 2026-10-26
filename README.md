@@ -4,7 +4,13 @@
 | --------- | ----------------- |
 | The GOAT  | Face Liveness Detection and Presentation Attack Detection for Registration and Biometric Authentication |
 
----
+--- 
+
+## Submission Materials
+
+| Item | Link |
+|---|---|
+| Pitch deck | [Google Drive](https://drive.google.com/drive/folders/1XBJKaGMNHPnxNfJUa6l2kE52_T8waVnU?usp=sharing) |
 
 # FaceGuard
 

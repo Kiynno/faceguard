@@ -1,13 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChallengeType, EngineSnapshot } from "@/types";
+import type { ChallengeType, EngineSnapshot, FlashColor } from "@/types";
 
 interface WebcamCaptureProps {
   snapshot: EngineSnapshot;
   onVideoReady: (video: HTMLVideoElement | null) => void;
   onStart: () => void;
   onAbort: () => void;
+  /** True while the signed session plan is being fetched from the server. */
+  starting: boolean;
+  startError: string | null;
 }
 
 type CameraState =
@@ -15,6 +18,13 @@ type CameraState =
   | { status: "requesting" }
   | { status: "active" }
   | { status: "error"; message: string };
+
+/** Pure, fully saturated colours give the strongest reflection on skin. */
+const FLASH_FILL: Record<FlashColor, string> = {
+  RED: "#ff0000",
+  GREEN: "#00ff00",
+  BLUE: "#0000ff",
+};
 
 const CHALLENGE_ICON: Record<ChallengeType, string> = {
   BLINK: "👁",
@@ -42,7 +52,14 @@ function describeCameraError(err: unknown): string {
   return err instanceof Error ? err.message : "Unable to start the camera.";
 }
 
-export default function WebcamCapture({ snapshot, onVideoReady, onStart, onAbort }: WebcamCaptureProps) {
+export default function WebcamCapture({
+  snapshot,
+  onVideoReady,
+  onStart,
+  onAbort,
+  starting,
+  startError,
+}: WebcamCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -104,10 +121,11 @@ export default function WebcamCapture({ snapshot, onVideoReady, onStart, onAbort
     ctx.clearRect(0, 0, w, h);
 
     const { phase, metrics, result } = snapshot;
-    const active = phase === "positioning" || phase === "passive" || phase === "challenge";
+    const active = phase === "positioning" || phase === "passive" || phase === "photometric" || phase === "challenge";
 
     let color = "rgba(148,163,184,0.7)";
     if (phase === "passive") color = "rgba(167,139,250,0.95)";
+    if (phase === "photometric") color = "rgba(232,121,249,0.95)";
     if (phase === "challenge") color = "rgba(34,211,238,0.95)";
     if (phase === "positioning" && snapshot.phaseProgress > 0) color = "rgba(56,189,248,0.95)";
     if (phase === "complete" && result) {
@@ -165,11 +183,27 @@ export default function WebcamCapture({ snapshot, onVideoReady, onStart, onAbort
   }, [snapshot]);
 
   const { phase, challenge, result, guidance } = snapshot;
-  const sessionActive = phase === "positioning" || phase === "passive" || phase === "challenge";
-  const canStart = camera.status === "active" && (phase === "ready" || phase === "complete");
+  const sessionActive =
+    phase === "positioning" || phase === "passive" || phase === "photometric" || phase === "challenge";
+  const canStart = camera.status === "active" && !starting && (phase === "ready" || phase === "complete");
+  const flash = snapshot.flashColor;
 
   return (
     <section className="flex flex-col gap-4">
+      {/* Screen-flash challenge: the whole screen lights the face in a server-chosen colour. */}
+      {flash && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center pb-16"
+          style={{ backgroundColor: FLASH_FILL[flash] }}
+          role="alert"
+          aria-live="assertive"
+        >
+          <p className="rounded-full bg-black/70 px-5 py-2 text-sm font-medium text-white">
+            Keep looking at the camera — screen check {Math.min(5, Math.floor(snapshot.phaseProgress * 5) + 1)}/5
+          </p>
+        </div>
+      )}
+
       <div className="relative aspect-video w-full overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-cyan-950/30">
         <video
           ref={videoRef}
@@ -259,8 +293,14 @@ export default function WebcamCapture({ snapshot, onVideoReady, onStart, onAbort
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-slate-500">
-          Frames are processed on-device. No images are stored or transmitted.
+          Frames are processed on-device. The screen briefly flashes red, green and blue during the check
+          (under 2 flashes per second).
         </p>
+        {startError && (
+          <p className="w-full text-xs text-rose-300" role="alert">
+            {startError}
+          </p>
+        )}
         <div className="flex gap-2">
           {sessionActive ? (
             <button
@@ -277,7 +317,13 @@ export default function WebcamCapture({ snapshot, onVideoReady, onStart, onAbort
               disabled={!canStart}
               className="rounded-lg bg-cyan-400 px-5 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 hover:bg-cyan-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 disabled:shadow-none"
             >
-              {phase === "complete" ? "Run again" : phase === "initializing" ? "Loading model…" : "Start liveness check"}
+              {starting
+                ? "Requesting session…"
+                : phase === "complete"
+                  ? "Run again"
+                  : phase === "initializing"
+                    ? "Loading model…"
+                    : "Start liveness check"}
             </button>
           )}
         </div>

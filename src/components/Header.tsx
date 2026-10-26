@@ -12,6 +12,7 @@ const PHASE_STYLE: Record<EnginePhase, { label: string; dot: string; text: strin
   ready: { label: "Ready", dot: "bg-sky-400", text: "text-sky-300" },
   positioning: { label: "Positioning", dot: "bg-sky-400 animate-pulse", text: "text-sky-300" },
   passive: { label: "Passive PAD", dot: "bg-violet-400 animate-pulse", text: "text-violet-300" },
+  photometric: { label: "Screen flash", dot: "bg-fuchsia-400 animate-pulse", text: "text-fuchsia-300" },
   challenge: { label: "Challenge", dot: "bg-cyan-400 animate-pulse", text: "text-cyan-300" },
   evaluating: { label: "Evaluating", dot: "bg-amber-400 animate-pulse", text: "text-amber-300" },
   complete: { label: "Complete", dot: "bg-emerald-400", text: "text-emerald-300" },
@@ -20,7 +21,7 @@ const PHASE_STYLE: Record<EnginePhase, { label: string; dot: string; text: strin
 
 export default function Header({ phase, sessionId, fps }: HeaderProps) {
   const style = PHASE_STYLE[phase];
-  const live = phase === "positioning" || phase === "passive" || phase === "challenge";
+  const live = phase === "positioning" || phase === "passive" || phase === "photometric" || phase === "challenge";
 
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/80 backdrop-blur">

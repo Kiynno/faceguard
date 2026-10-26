@@ -10,13 +10,22 @@ import type {
   ChallengeType,
   EngineSnapshot,
   PadDecision,
+  PadResult,
   PadSignal,
+  ReferenceImageMeta,
+  VerificationResponse,
 } from "@/types";
+
+export type VerifyState = "idle" | "verifying" | "done" | "error";
 
 interface AuditPanelProps {
   snapshot: EngineSnapshot;
   events: AuditEvent[];
   report: AuditReport | null;
+  verification: VerificationResponse | null;
+  verifyState: VerifyState;
+  verifyError: string | null;
+  reference: { url: string; meta: ReferenceImageMeta } | null;
 }
 
 const DECISION_STYLE: Record<PadDecision, { label: string; ring: string; text: string; bg: string }> = {
@@ -31,12 +40,17 @@ const SEVERITY_STYLE: Record<AuditSeverity, string> = {
   critical: "text-rose-300",
 };
 
+/** Ordered by weight in the fused score. */
 const SIGNAL_LABEL: Record<PadSignal, string> = {
   challenge: "Active challenges",
+  depth: "3D depth (head turn)",
+  photometric: "Screen-flash reflection",
   motion: "Micro-motion / blink",
+  injection: "Camera integrity",
+  pulse: "Pulse signal (rPPG)",
+  moire: "Moiré (screen replay)",
   texture: "Texture sharpness",
-  specular: "Specular (anti-replay)",
-  color: "Chroma richness",
+  specular: "Specular glare",
 };
 
 const CHALLENGE_LABEL: Record<ChallengeType, string> = {
@@ -50,7 +64,7 @@ const CHALLENGE_LABEL: Record<ChallengeType, string> = {
 function Card({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-slate-900/60">
-      <div className="flex items-center justify-between border-b border-white/5 px-4 py-2.5">
+      <div className="flex items-center justify-between gap-2 border-b border-white/5 px-4 py-2.5">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-400">{title}</h2>
         {action}
       </div>
@@ -68,19 +82,77 @@ function Stat({ label, value, warn = false }: { label: string; value: string; wa
   );
 }
 
-export default function AuditPanel({ snapshot, events, report }: AuditPanelProps) {
-  const logRef = useRef<HTMLOListElement>(null);
-  const [verification, setVerification] = useState<ChainVerification | null>(null);
-  const [verifying, setVerifying] = useState(false);
+function DecisionBody({ result, source }: { result: PadResult; source: string }) {
+  const style = DECISION_STYLE[result.decision];
+  return (
+    <div className={`rounded-xl border p-4 ${style.ring} ${style.bg}`}>
+      <div className="flex items-baseline justify-between gap-2">
+        <p className={`text-lg font-semibold ${style.text}`}>{style.label}</p>
+        <p className="font-mono text-2xl font-semibold tabular-nums text-white">{result.score.toFixed(3)}</p>
+      </div>
+      <p className="mt-1 font-mono text-[11px] text-slate-400">
+        {source} · bona fide ≥ {result.bonaFideThreshold} · attack &lt; {result.attackThreshold}
+      </p>
+      <ul className="mt-4 space-y-2">
+        {(Object.keys(SIGNAL_LABEL) as PadSignal[]).map((key) => {
+          const v = result.subscores[key];
+          return (
+            <li key={key}>
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-300">{SIGNAL_LABEL[key]}</span>
+                <span className="font-mono tabular-nums text-slate-400">{v.toFixed(2)}</span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className={`h-full rounded-full ${v >= 0.65 ? "bg-emerald-400" : v >= 0.4 ? "bg-amber-400" : "bg-rose-400"}`}
+                  style={{ width: `${v * 100}%` }}
+                />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {result.suspectedPai.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-1.5">
+          {result.suspectedPai.map((pai) => (
+            <span key={pai} className="rounded-md border border-rose-400/30 bg-rose-500/10 px-2 py-0.5 font-mono text-[10px] text-rose-200">
+              PAI: {pai}
+            </span>
+          ))}
+        </div>
+      )}
+      <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-slate-400">
+        {result.reasons.map((r) => (
+          <li key={r}>{r}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
-  const result = snapshot.result ?? report?.result ?? null;
+export default function AuditPanel({
+  snapshot,
+  events,
+  report,
+  verification,
+  verifyState,
+  verifyError,
+  reference,
+}: AuditPanelProps) {
+  const logRef = useRef<HTMLOListElement>(null);
+  const [chainCheck, setChainCheck] = useState<ChainVerification | null>(null);
+  const [checkingChain, setCheckingChain] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const clientResult = snapshot.result ?? report?.result ?? null;
+  const serverResult = verification?.verified ? verification.serverResult : null;
   const face = snapshot.metrics?.face ?? null;
   const chainHead = events.at(-1)?.hash ?? null;
 
-  // Auto-scroll the event log and invalidate stale verification.
+  // Auto-scroll the event log and invalidate a stale chain check.
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-    setVerification(null);
+    setChainCheck(null);
   }, [events.length]);
 
   const challengeRows = useMemo(
@@ -88,23 +160,29 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
       snapshot.plannedChallenges.map((type, i) => {
         const done = snapshot.completedChallenges[i];
         const isActive = snapshot.challenge?.index === i;
-        return { type, status: done?.status ?? (isActive ? "active" : "pending"), rt: done?.responseTimeMs ?? null };
+        return {
+          type,
+          status: done?.status ?? (isActive ? "active" : "pending"),
+          rt: done?.responseTimeMs ?? null,
+          depth: done?.depthResidual ?? null,
+        };
       }),
     [snapshot.plannedChallenges, snapshot.completedChallenges, snapshot.challenge],
   );
 
-  const handleVerify = async () => {
-    setVerifying(true);
+  const handleVerifyChain = async () => {
+    setCheckingChain(true);
     try {
-      setVerification(await verifyAuditChain(events));
+      setChainCheck(await verifyAuditChain(events));
     } finally {
-      setVerifying(false);
+      setCheckingChain(false);
     }
   };
 
   const handleExport = () => {
     if (!report) return;
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const payload = { report, serverVerification: verification };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -115,55 +193,25 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
     URL.revokeObjectURL(url);
   };
 
+  const handleCopyAttestation = async () => {
+    if (!verification?.attestation) return;
+    try {
+      await navigator.clipboard.writeText(verification.attestation);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   return (
     <aside className="flex flex-col gap-4" aria-label="PAD audit panel">
-      {/* Decision */}
+      {/* Decision — the server's verdict is authoritative once available */}
       <Card title="PAD decision">
-        {result ? (
-          <div className={`rounded-xl border p-4 ${DECISION_STYLE[result.decision].ring} ${DECISION_STYLE[result.decision].bg}`}>
-            <div className="flex items-baseline justify-between gap-2">
-              <p className={`text-lg font-semibold ${DECISION_STYLE[result.decision].text}`}>
-                {DECISION_STYLE[result.decision].label}
-              </p>
-              <p className="font-mono text-2xl font-semibold tabular-nums text-white">{result.score.toFixed(3)}</p>
-            </div>
-            <p className="mt-1 font-mono text-[11px] text-slate-400">
-              bona fide ≥ {result.bonaFideThreshold} · attack &lt; {result.attackThreshold}
-            </p>
-            <ul className="mt-4 space-y-2">
-              {(Object.keys(SIGNAL_LABEL) as PadSignal[]).map((key) => {
-                const v = result.subscores[key];
-                return (
-                  <li key={key}>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-slate-300">{SIGNAL_LABEL[key]}</span>
-                      <span className="font-mono tabular-nums text-slate-400">{v.toFixed(2)}</span>
-                    </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/10">
-                      <div
-                        className={`h-full rounded-full ${v >= 0.65 ? "bg-emerald-400" : v >= 0.4 ? "bg-amber-400" : "bg-rose-400"}`}
-                        style={{ width: `${v * 100}%` }}
-                      />
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-            {result.suspectedPai.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-1.5">
-                {result.suspectedPai.map((pai) => (
-                  <span key={pai} className="rounded-md border border-rose-400/30 bg-rose-500/10 px-2 py-0.5 font-mono text-[10px] text-rose-200">
-                    PAI: {pai}
-                  </span>
-                ))}
-              </div>
-            )}
-            <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-slate-400">
-              {result.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
-          </div>
+        {serverResult ? (
+          <DecisionBody result={serverResult} source="server-verified" />
+        ) : clientResult ? (
+          <DecisionBody result={clientResult} source={verifyState === "verifying" ? "client · verifying…" : "client · unverified"} />
         ) : (
           <p className="text-sm text-slate-500">
             {snapshot.phase === "error" ? snapshot.error : "Awaiting a completed session."}
@@ -171,10 +219,84 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
         )}
       </Card>
 
+      {/* Server verification */}
+      <Card title="Server attestation">
+        {verifyState === "idle" && <p className="text-sm text-slate-500">Sent to the server when a session completes.</p>}
+        {verifyState === "verifying" && <p className="animate-pulse text-sm text-slate-400">Verifying with server…</p>}
+        {verifyState === "error" && <p className="text-sm text-rose-300">{verifyError ?? "Verification failed."}</p>}
+        {verifyState === "done" && verification && (
+          <div className="space-y-3">
+            <p className={`text-sm font-medium ${verification.verified ? "text-emerald-300" : "text-rose-300"}`}>
+              {verification.verified ? "✓ Verified and signed by server" : "✗ Rejected by server"}
+              {verification.verified && !verification.clientServerAgree && (
+                <span className="ml-2 text-xs text-amber-300">(client and server decisions differ)</span>
+              )}
+            </p>
+            <ul className="space-y-1 text-[11px]">
+              {verification.checks.map((c) => (
+                <li key={c.name} className="flex gap-2">
+                  <span className={c.passed ? "text-emerald-400" : "text-rose-400"}>{c.passed ? "✓" : "✗"}</span>
+                  <span className="text-slate-300">{c.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-right text-slate-500" title={c.detail}>
+                    {c.detail}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {verification.attestation && (
+              <div className="rounded-lg bg-black/30 p-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase tracking-wider text-slate-500">
+                    Attestation (EdDSA · key {verification.keyId})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyAttestation()}
+                    className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-white/5"
+                  >
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <p className="mt-1 break-all font-mono text-[10px] leading-snug text-slate-400">
+                  {verification.attestation.slice(0, 120)}…
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* Reference capture for 1:1 matching */}
+      {reference && (
+        <Card title="Reference capture">
+          <div className="flex gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element -- local blob URL */}
+            <img
+              src={reference.url}
+              alt="Reference face crop"
+              width={72}
+              height={72}
+              className="h-18 w-18 shrink-0 rounded-lg border border-white/10 object-cover"
+            />
+            <div className="min-w-0 text-[11px] text-slate-400">
+              <p>Best frontal frame, ready for 1:1 matching (e.g. MOSIP). Kept in memory only.</p>
+              <p className="mt-1 truncate font-mono text-slate-500" title={reference.meta.sha256}>
+                sha256 {reference.meta.sha256.slice(0, 24)}…
+              </p>
+              <p className={verification?.claims?.referenceImageSha256 === reference.meta.sha256 ? "text-emerald-300" : "text-slate-500"}>
+                {verification?.claims?.referenceImageSha256 === reference.meta.sha256
+                  ? "✓ Hash bound into the signed attestation"
+                  : "Not yet bound to an attestation"}
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Challenges */}
       <Card title="Challenge–response">
         {challengeRows.length === 0 ? (
-          <p className="text-sm text-slate-500">A randomised sequence is issued per session.</p>
+          <p className="text-sm text-slate-500">The server issues a random sequence with at least one head turn.</p>
         ) : (
           <ol className="space-y-1.5">
             {challengeRows.map((row, i) => (
@@ -196,6 +318,7 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
                 >
                   {row.status}
                   {row.rt !== null && ` · ${row.rt} ms`}
+                  {row.depth !== null && ` · depth ${row.depth.toFixed(3)}`}
                 </span>
               </li>
             ))}
@@ -216,6 +339,20 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
           <Stat label="Specular" value={face ? `${(face.specularRatio * 100).toFixed(1)}%` : "—"} warn={!!face && face.specularRatio > 0.05} />
           <Stat label="Luma" value={face ? face.brightness.toFixed(0) : "—"} />
         </dl>
+        {report && (
+          <dl className="mt-2 grid grid-cols-3 gap-2">
+            <Stat
+              label="Pulse"
+              value={report.passive.pulseBpm !== null && report.passive.pulseSnr > 1.5 ? `${report.passive.pulseBpm.toFixed(0)} bpm` : "—"}
+            />
+            <Stat
+              label="Flash corr."
+              value={report.photometric ? report.photometric.correlation.toFixed(2) : "—"}
+              warn={!!report.photometric && !report.photometric.conclusive}
+            />
+            <Stat label="Dup. frames" value={`${(report.injection.duplicateFrameRatio * 100).toFixed(0)}%`} warn={report.injection.duplicateFrameRatio > 0.1} />
+          </dl>
+        )}
       </Card>
 
       {/* Audit log */}
@@ -225,11 +362,11 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
           <div className="flex gap-1.5">
             <button
               type="button"
-              onClick={() => void handleVerify()}
-              disabled={events.length === 0 || verifying}
+              onClick={() => void handleVerifyChain()}
+              disabled={events.length === 0 || checkingChain}
               className="rounded-md border border-white/10 px-2 py-1 text-[11px] text-slate-300 hover:bg-white/5 disabled:opacity-40"
             >
-              {verifying ? "Verifying…" : "Verify chain"}
+              {checkingChain ? "Verifying…" : "Verify chain"}
             </button>
             <button
               type="button"
@@ -262,11 +399,11 @@ export default function AuditPanel({ snapshot, events, report }: AuditPanelProps
           <p className="truncate font-mono text-slate-500" title={chainHead ?? undefined}>
             chain head: {chainHead ? `${chainHead.slice(0, 24)}…` : "—"}
           </p>
-          {verification && (
-            <p className={verification.valid ? "text-emerald-300" : "text-rose-300"} role="status">
-              {verification.valid
-                ? `✓ Hash chain intact (${verification.checked} events)`
-                : `✗ Chain broken at event #${verification.brokenAt}`}
+          {chainCheck && (
+            <p className={chainCheck.valid ? "text-emerald-300" : "text-rose-300"} role="status">
+              {chainCheck.valid
+                ? `✓ Hash chain intact (${chainCheck.checked} events)`
+                : `✗ Chain broken at event #${chainCheck.brokenAt}`}
             </p>
           )}
           {report && (

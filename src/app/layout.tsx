@@ -8,7 +8,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 export const metadata: Metadata = {
   title: "FaceGuard — Liveness & PAD",
   description:
-    "Biometric liveness and presentation attack detection.",
+    "Biometric liveness and presentation attack detection with an ISO/IEC 30107-aligned, hash-chained audit trail. Built for MOSIP Decode 2026.",
   robots: { index: false, follow: false },
 };
 

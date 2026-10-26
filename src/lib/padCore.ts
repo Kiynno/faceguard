@@ -82,7 +82,7 @@ export const DEFAULT_CONFIG: LivenessConfig = {
     nonRigidRange: [0.0015, 0.006],
     depthRange: [0.01, 0.025],
     photometricRange: [0.05, 0.4],
-    pulseSnrRange: [1.5, 4],
+    pulseSnrRange: [5, 15],
     moireRange: [8, 20],
     duplicateRange: [0.1, 0.4],
   },
@@ -499,7 +499,8 @@ export function decidePad(input: PadInput, config: LivenessConfig = DEFAULT_CONF
     .filter((c) => c.status === "passed" && c.depthResidual !== null)
     .map((c) => c.depthResidual as number);
   const depthMeasured = depths.length > 0;
-  const depthResidual = depthMeasured ? Math.max(...depths) : 0;
+  // Every head turn must look 3D, so one flat turn cannot hide behind a real one.
+  const depthResidual = depthMeasured ? Math.min(...depths) : 0;
 
   const subscores: PadSubscores = {
     challenge: total === 0 ? 0 : passed / total,

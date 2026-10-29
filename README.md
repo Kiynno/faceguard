@@ -171,11 +171,9 @@ FaceGuard uses ISO/IEC 30107-1 terminology (bona fide presentation, attack prese
 |---|---|---|
 | J. Fajarillo | [@jfajarillo](https://github.com/jfajarillo) | Documentation |
 | C. Evangelista | [@Shiro823-a](https://github.com/Shiro823-a) |  PAD / Algorithm Developer | Liveness engine and detection checks (depth, screen flash, pulse, moiré) |
-| Y. Geronimo | [@jfajarillo](https://github.com/jfajarillo) | ROLE |
+| Y. Geronimo | [@jfajarillo](https://github.com/jfajarillo) | Backend / Security Developer | Server API, signed session plans, report verification, attestation  |
 | D. Montes | [@jfajarillo](https://github.com/jfajarillo) | ROLE |
 | G. Quizon | [@jfajarillo](https://github.com/jfajarillo) | ROLE |
-
-<!-- Add the remaining team members and their contributions. -->
 
 ## License
 
